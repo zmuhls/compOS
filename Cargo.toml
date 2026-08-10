@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/compos-core", "crates/composd", "crates/composctl"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/zmuhls/compOS"
+
+[workspace.dependencies]
+compos-core = { path = "crates/compos-core" }
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+fs4 = "0.13"
+uuid = { version = "1", features = ["v7"] }
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"

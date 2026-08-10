@@ -1,0 +1,17 @@
+[package]
+name = "composctl"
+description = "CompOS vault command-line client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+compos-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+hex.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

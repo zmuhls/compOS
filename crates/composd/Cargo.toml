@@ -1,0 +1,11 @@
+[package]
+name = "composd"
+description = "CompOS document authority daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+compos-core.workspace = true
+anyhow.workspace = true
