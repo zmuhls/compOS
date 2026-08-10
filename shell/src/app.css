@@ -1,0 +1,36 @@
+:root {
+  --paper: #faf9f6;
+  --ink: #1c1b19;
+  --rule: #d8d5cf;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: Georgia, "Times New Roman", serif;
+  line-height: 1.6;
+}
+
+.page {
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 6rem 2rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin: 0 0 1rem;
+}
+
+.rule {
+  border-top: 1px solid var(--rule);
+  margin: 0 0 1.5rem;
+}
