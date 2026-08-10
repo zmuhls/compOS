@@ -6,6 +6,25 @@
 //! construction: `VaultWriter` is the only mutation path, and it can only be
 //! obtained from a `Vault` holding the exclusive vault lock.
 
+pub mod error;
+pub mod fsutil;
+pub mod ids;
+pub mod journal;
+pub mod lease;
+pub mod objects;
+pub mod profile;
+mod reconcile;
+pub mod vault;
+pub mod writer;
+
+pub use error::VaultError;
+pub use ids::{DocId, ObjectHash, RevisionId};
+pub use journal::{DocHead, DocIndex, JournalRecord, RevisionOrigin};
+pub use lease::{Lease, LeaseId};
+pub use profile::HostProfile;
+pub use vault::Vault;
+pub use writer::{DocRef, SaveOutcome, SaveRequest, VaultWriter};
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The newest vault format this build can open (ARCHITECTURE.md §5.2).
