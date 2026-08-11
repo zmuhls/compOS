@@ -8,4 +8,13 @@ repository.workspace = true
 
 [dependencies]
 compos-core.workspace = true
+compos-rpc.workspace = true
 anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+notify.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json.workspace = true

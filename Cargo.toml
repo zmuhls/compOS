@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/compos-core", "crates/composd", "crates/composctl"]
+members = [
+    "crates/compos-core",
+    "crates/compos-rpc",
+    "crates/composd",
+    "crates/composctl",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +15,7 @@ repository = "https://github.com/zmuhls/compOS"
 
 [workspace.dependencies]
 compos-core = { path = "crates/compos-core" }
+compos-rpc = { path = "crates/compos-rpc" }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,3 +28,15 @@ clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 rusqlite = { version = "0.40", features = ["bundled"] }
 jsonschema = { version = "0.49", default-features = false }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "macros",
+    "signal",
+] }
+tokio-tungstenite = "0.30"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+notify = "8"
