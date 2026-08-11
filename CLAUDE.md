@@ -17,12 +17,13 @@ cargo test -p compos-core save_and_read_back         # one test by name
 TORTURE_ITERS=1000 cargo test -p composctl --test torture   # milestone gate
 TORTURE_ITERS=1000 TORTURE_DOCS=500 cargo test -p composctl --test torture  # phase-1 exit gate
 cargo test -p compos-rpc --test conformance          # constitution suite
+cargo test -p composd --test daemon                  # live daemon + watcher e2e (notify-timing sensitive)
 pnpm install && pnpm -C shell typecheck && pnpm -C shell build   # web shell
 cargo run -p composctl -- --vault /tmp/v init        # manual smoke
 cargo run -p composd -- --vault /tmp/v               # run the daemon (uds + ws :7411)
 ```
 
-`composctl` subcommands: `init save log cat search scan version` (+ hidden `_torture-child`). `composd` flags: `--vault --ws-port --socket --self-check`.
+`composctl` subcommands: `init save log cat search scan version` (+ hidden `_torture-child`). `composd` flags: `--vault --ws-port --socket --self-check`; it writes the WebSocket auth token to `<vault>/state/rpc-token` (0600) at startup.
 
 CI (`.github/workflows/ci.yml`) runs the rust matrix on macos-latest, ubuntu-latest, and ubuntu-24.04-arm (native arm64) plus the shell job. All must stay green — the arm runner exists so Pi problems surface years early.
 
@@ -30,7 +31,7 @@ Commits: short, lowercase, no sign-off.
 
 ## Architecture (the parts that span files)
 
-Four crates: `compos-core` (pure sync library — all the semantics), `compos-rpc` (tokio UDS + WebSocket JSON-RPC boundary; role typing and capability caps live here, no document logic), `composd` (daemon: opens the vault, serves compos-rpc, runs the notify watcher), `composctl` (CLI client linking compos-core directly; also hosts the hidden `_torture-child` subcommand).
+Four crates: `compos-core` (pure sync library — all the semantics), `compos-rpc` (tokio UDS + WebSocket JSON-RPC boundary; role typing and capability caps live here, no document logic), `composd` (daemon: opens the vault, serves compos-rpc, runs the notify watcher), `composctl` (CLI client linking compos-core directly; also hosts the hidden `_torture-child` subcommand). Keep the async boundary where it is: **compos-core stays synchronous** — tokio appears only in compos-rpc and composd, and deliberate absences stay absent (no chrono: integer-ms timestamps; no JSON-RPC framework: `proto.rs`/`session.rs` are the whole protocol).
 
 **The journal is truth.** `journal/` holds append-only JSONL records (canonical tier-1 state, §5.2); document heads are *derived* by replay in `DocIndex` — there is deliberately no pointer file and no second source of truth. `state/compos.db` (`derived.rs`) is a rebuildable FTS5 cache fed by the same replay: its **only** migration policy is destroy-and-rebuild on any `user_version` skew, and `tests/derived_rebuild.rs` proves delete → rebuild → identical results (rule 4). Anything that would create a second authority is a constitution violation.
 
