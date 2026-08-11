@@ -15,6 +15,7 @@ libc.workspace = true
 uuid.workspace = true
 hex.workspace = true
 rusqlite.workspace = true
+jsonschema.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
