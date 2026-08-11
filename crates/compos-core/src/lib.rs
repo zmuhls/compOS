@@ -6,6 +6,7 @@
 //! construction: `VaultWriter` is the only mutation path, and it can only be
 //! obtained from a `Vault` holding the exclusive vault lock.
 
+pub mod codec;
 pub mod command;
 pub mod derived;
 pub mod error;
@@ -20,6 +21,7 @@ mod reconcile;
 pub mod vault;
 pub mod writer;
 
+pub use codec::{Codec, CodecRegistry, Fidelity, MarkdownIdentity, logical_digest};
 pub use command::{
     CommandHandler, CommandRegistry, CommandSpec, Effect, NetworkPolicy, ResourceClass,
 };
