@@ -4,7 +4,8 @@
 //!
 //! Iterations: `TORTURE_ITERS` env var, default 100 (CI-tolerable). Run
 //! `TORTURE_ITERS=1000 cargo test -p composctl --test torture` before
-//! declaring a milestone done.
+//! declaring a milestone done. `TORTURE_DOCS` (default 8) widens the
+//! synthetic vault — the Phase-1 exit gate runs it at 500.
 
 #![cfg(unix)]
 
@@ -13,7 +14,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use compos_core::{ObjectHash, RevisionId, Vault};
+use compos_core::{DocRef, ObjectHash, RevisionId, RevisionOrigin, SaveRequest, Vault};
 
 type Ack = (String, String, String); // path, rev, object
 
@@ -23,9 +24,34 @@ fn kill9_save_torture() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(100);
+    let docs: u32 = std::env::var("TORTURE_DOCS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
 
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("vault");
+
+    // Seed the synthetic vault so every document the children will touch
+    // exists up front — the Phase-1 exit gate tortures a full 500-document
+    // vault, not an empty one that happens to allow 500 paths.
+    {
+        let mut vault = Vault::init(&root).expect("init synthetic vault");
+        for di in 0..docs {
+            vault
+                .writer()
+                .unwrap()
+                .save(SaveRequest {
+                    doc: DocRef::Path(format!("notes/doc-{di}.md")),
+                    base: None,
+                    content: format!("# doc {di}\nseed\n").into_bytes(),
+                    origin: RevisionOrigin::Editor,
+                    lease: None,
+                })
+                .expect("seed save");
+        }
+    }
+
     let mut all_acks: Vec<Ack> = Vec::new();
     let mut seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -39,7 +65,7 @@ fn kill9_save_torture() {
             .arg(&root)
             .arg("_torture-child")
             .arg("--docs")
-            .arg("8")
+            .arg(docs.to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -71,16 +97,7 @@ fn kill9_save_torture() {
         child.wait().expect("wait");
         all_acks.extend(reader.join().unwrap());
 
-        if !root.join("compos.json").exists() {
-            // Killed before init completed: nothing can have been acked.
-            assert!(
-                all_acks.is_empty(),
-                "acks observed without an initialized vault"
-            );
-            continue;
-        }
-
-        if let Err(msg) = verify(&root, &all_acks) {
+        if let Err(msg) = verify(&root, &all_acks, docs) {
             let kept = dir.keep();
             panic!(
                 "torture iteration {iter} failed: {msg}\nvault kept for autopsy at {}",
@@ -97,8 +114,17 @@ fn kill9_save_torture() {
 
 /// Open the vault (running tail repair + reconciliation) and check every
 /// invariant the save transaction promises.
-fn verify(root: &Path, acks: &[Ack]) -> Result<(), String> {
+fn verify(root: &Path, acks: &[Ack], docs: u32) -> Result<(), String> {
     let vault = Vault::open_write(root).map_err(|e| format!("open_write failed: {e}"))?;
+
+    // Every seeded document must still exist — no acknowledged document
+    // ever vanishes, whatever the kill did.
+    if vault.index().len() != docs as usize {
+        return Err(format!(
+            "expected {docs} documents, found {}",
+            vault.index().len()
+        ));
+    }
 
     // Every acknowledged save is in the journal (acked ⊆ journal; a record
     // fsynced but killed before its ack line is durable-but-unacked, legal).
