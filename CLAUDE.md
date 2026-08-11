@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-CompOS is writing/reading software with one document authority (`composd`). **ARCHITECTURE.md is the design authority** — read the relevant section before changing anything structural; section numbers below refer to it. The build plan (§16) runs Phase 0 → 7; Phases 0 and 1 are code-complete (vault, objects, journal, save transaction, SQLite/FTS5 tier-2, external-edit watcher, command registry, compos-rpc, N/N-1 harness, round-trip harness, conformance suite, torture gates). Two `DECISION(user):` markers still await ratification before Phase 1 is formally closed. Next: Phase 2 (web shell — Write + Search + basic Read).
+CompOS is writing/reading software with one document authority (`composd`). **ARCHITECTURE.md is the design authority** — read the relevant section before changing anything structural; section numbers below refer to it. The build plan (§16) runs Phase 0 → 7; Phases 0 and 1 are complete (vault, objects, journal, save transaction, SQLite/FTS5 tier-2, external-edit watcher, command registry, compos-rpc, N/N-1 harness, round-trip harness, conformance suite, torture gates; both former `DECISION(user)` markers ratified 2026-08-11 — see the `RATIFIED` comments in `journal.rs` and `lease.rs`). Next: Phase 2 (web shell — Write + Search + basic Read).
 
 ## Commands
 
@@ -44,6 +44,6 @@ Four crates: `compos-core` (pure sync library — all the semantics), `compos-rp
 
 **Frozen fixtures are contracts.** `compos-core/tests/fixtures/vault-format-N/` are golden vaults generated once by the build that introduced format N and never regenerated — `schema_compat.rs` forces every supported format to keep opening (tier-1 N/N-1 gate). `tests/fixtures/roundtrip/<codec-id>/` is the round-trip corpus (`codec.rs`; the `Codec` trait makes one-way codecs unrepresentable).
 
-Two `DECISION(user):` markers await the owner's ratification and should not be resolved unilaterally: the `JournalRecord` wire format (`journal.rs`) and lease semantics (`lease.rs`) — the latter now shapes observable `LEASE_HELD` behavior through the RPC boundary.
+**Ratified contracts (2026-08-11, owner decision — do not revisit unilaterally):** the `JournalRecord` wire format is final for vault format 1 (short field names, `path` in-record, integer-ms `ts`, three-tier bump policy — details in `journal.rs`); leases are optional/advisory over base-matching, 60 s sliding TTL renewed by the holder's saves or explicit renew, auto-release on expiry, no steal verb (`lease.rs`). These are the `LEASE_HELD`/record-format contracts of the API — changing either is a design-authority change, not a refactor.
 
 Donor code: reusable prior art lives in sibling repos (inventory with pinned SHAs in ARCHITECTURE.md §14). `/comprosody` and the iCloud snapshot dirs are explicitly non-donors — do not mine them.

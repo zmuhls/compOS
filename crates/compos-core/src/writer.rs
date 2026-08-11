@@ -113,7 +113,7 @@ impl<'v> VaultWriter<'v> {
         }
         self.vault
             .leases
-            .check(&doc_id, req.lease.as_ref(), fsutil::now_ms())?;
+            .check_and_renew(&doc_id, req.lease.as_ref(), fsutil::now_ms())?;
 
         self.commit(&doc_id, &path, &req.content, req.origin, expected)
     }

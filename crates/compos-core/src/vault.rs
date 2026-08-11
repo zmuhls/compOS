@@ -210,6 +210,14 @@ impl Vault {
         self.leases.acquire(doc, fsutil::now_ms())
     }
 
+    /// Slide a held lease's TTL forward (ratified lease rule 2).
+    pub fn renew_lease(&mut self, doc: &DocId, id: &LeaseId) -> Result<(), VaultError> {
+        if self.mode != OpenMode::Write {
+            return Err(VaultError::ReadOnly);
+        }
+        self.leases.renew(doc, id, fsutil::now_ms())
+    }
+
     pub fn release_lease(&mut self, doc: &DocId, id: &LeaseId) {
         self.leases.release(doc, id);
     }

@@ -20,18 +20,19 @@ pub const JOURNAL_RECORD_VERSION: u32 = 1;
 
 const FIRST_SEGMENT: &str = "0000000001.jsonl";
 
-// DECISION(user): ratify the journal record wire format before the first
-// real (non-test) vault exists. This is permanent tier-1 canonical data —
-// every future subsystem (SQLite rebuild, `.compos` bundle records, external
-// revisions, proposals) replays or emits exactly this shape. Open choices
-// (5–10 lines of judgment, recorded here as a comment or amended fields):
-//   1. Final field names (`doc`/`rev`/`object` vs longer names)?
-//   2. Keep `path` in-record (rename = new record, replay tracks moves) vs
-//      a separate doc-id→path sidecar?
-//   3. `ts` as integer milliseconds vs RFC 3339 string?
-//   4. Policy line: what changes bump `v` (per-record schema) vs
-//      `vault_format` (on-disk layout)?
-// The slice runs on these scaffold defaults until ratified or amended.
+// RATIFIED(user, 2026-08-11): this wire format is final for vault format 1.
+// Permanent tier-1 canonical data — every future subsystem (SQLite rebuild,
+// `.compos` bundle records, external revisions, proposals) replays or emits
+// exactly this shape (golden fixture: tests/fixtures/vault-format-1).
+//   1. Field names stay short: v, ts, doc, rev, parent, object, path, origin.
+//   2. `path` lives in-record; a rename is a new record and replay tracks
+//      moves. No sidecar — the journal stays the single source of truth.
+//   3. `ts` is integer milliseconds since the Unix epoch.
+//   4. Version-bump policy, three tiers: additive optional fields → no bump
+//      (readers ignore unknowns; the journal is append-only and never
+//      rewritten); changes old readers would misread (rename/retype/
+//      semantics) → bump `v`; on-disk layout changes (segmenting scheme,
+//      object sharding, directories) → bump `vault_format` in compos.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalRecord {
     pub v: u32,
