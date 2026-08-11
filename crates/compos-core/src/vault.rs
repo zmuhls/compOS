@@ -85,6 +85,12 @@ impl Vault {
     pub fn open_write(root: &Path) -> Result<Vault, VaultError> {
         let lock = Self::take_lock(root, true)?;
         let format = Self::read_format(root)?;
+        // A vault restored from a backup or checkout may lack the empty
+        // working directories (nothing canonical lives in them); recreate
+        // the layout idempotently before anything touches it.
+        for sub in ["vault", "objects/sha256", "intents", "tmp", "state"] {
+            fs::create_dir_all(root.join(sub))?;
+        }
         let journal_dir = root.join("journal");
         let journal = Journal::open_write(&journal_dir)?;
         let records = journal::replay(&journal_dir, false)?;
