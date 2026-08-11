@@ -8,6 +8,7 @@
 
 pub mod derived;
 pub mod error;
+pub mod external;
 pub mod fsutil;
 pub mod ids;
 pub mod journal;
@@ -20,6 +21,7 @@ pub mod writer;
 
 pub use derived::{DERIVED_SCHEMA_VERSION, DerivedIndex, SearchHit};
 pub use error::VaultError;
+pub use external::ExternalScan;
 pub use ids::{DocId, ObjectHash, RevisionId};
 pub use journal::{DocHead, DocIndex, JournalRecord, RevisionOrigin};
 pub use lease::{Lease, LeaseId};

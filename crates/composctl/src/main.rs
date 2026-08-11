@@ -39,6 +39,8 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
+    /// Convert out-of-band edits under vault/ into external revisions.
+    Scan,
     /// Print version information.
     Version,
     /// Torture-harness child process (internal).
@@ -143,6 +145,20 @@ fn main() -> anyhow::Result<()> {
             };
             for hit in hits {
                 println!("{}\t{}\t{}", hit.path, hit.doc, hit.snippet);
+            }
+        }
+        Command::Scan => {
+            let mut vault = Vault::open_write(&root)?;
+            print_warnings(&vault);
+            let scan = vault.scan_external()?;
+            for out in &scan.converted {
+                println!("external {} {} {}", out.path, out.rev, out.object);
+            }
+            for path in &scan.missing {
+                eprintln!("warning: '{path}' has revisions but no visible file");
+            }
+            if scan.converted.is_empty() {
+                println!("no external changes");
             }
         }
         Command::Version => {

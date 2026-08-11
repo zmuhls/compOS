@@ -84,8 +84,25 @@ impl<'v> VaultWriter<'v> {
                 (id.clone(), head.path.clone())
             }
         };
-        let head = self.vault.index.head(&doc_id);
-        let expected = head.map(|h| h.rev.clone());
+        // Never-clobber guard (constitutional rule; §5.3): if the visible
+        // file holds bytes matching neither the recorded head nor the
+        // incoming content, it was edited out-of-band. Those bytes become an
+        // `external` revision *first*; the caller's save then fails
+        // `StaleBase` below and must rebase onto the external revision. The
+        // conversion deliberately skips the lease check — the bytes already
+        // exist, and recording them cannot wait for a lease holder.
+        let visible = self.vault.vault_dir().join(&path);
+        if let Some(disk) = read_optional(&visible)? {
+            let disk_hash = ObjectHash::of(&disk);
+            let head_object = self.vault.index.head(&doc_id).map(|h| h.object.clone());
+            if Some(&disk_hash) != head_object.as_ref() && disk_hash != ObjectHash::of(&req.content)
+            {
+                let parent = self.vault.index.head(&doc_id).map(|h| h.rev.clone());
+                self.commit(&doc_id, &path, &disk, RevisionOrigin::External, parent)?;
+            }
+        }
+
+        let expected = self.vault.index.head(&doc_id).map(|h| h.rev.clone());
 
         // Step 1: base revision and lease.
         if req.base != expected {
@@ -98,8 +115,21 @@ impl<'v> VaultWriter<'v> {
             .leases
             .check(&doc_id, req.lease.as_ref(), fsutil::now_ms())?;
 
+        self.commit(&doc_id, &path, &req.content, req.origin, expected)
+    }
+
+    /// Steps 2–6 of the save transaction, shared by ordinary saves and
+    /// external-revision conversion.
+    fn commit(
+        &mut self,
+        doc_id: &DocId,
+        path: &str,
+        content: &[u8],
+        origin: RevisionOrigin,
+        parent: Option<RevisionId>,
+    ) -> Result<SaveOutcome, VaultError> {
         // Step 2: immutable content object, flushed and fsynced.
-        let object = self.vault.objects.put(&req.content)?;
+        let object = self.vault.objects.put(content)?;
 
         // Step 3: durable write intent, before the visible file changes.
         let rev = RevisionId::generate();
@@ -108,19 +138,19 @@ impl<'v> VaultWriter<'v> {
             ts: fsutil::now_ms(),
             doc: doc_id.clone(),
             rev: rev.clone(),
-            parent: expected.clone(),
+            parent: parent.clone(),
             object: object.clone(),
-            path: path.clone(),
+            path: path.to_owned(),
         };
         let intent_path = self.vault.intents_dir().join(format!("{rev}.json"));
         fsutil::write_atomic(&intent_path, &serde_json::to_vec(&intent)?)?;
 
         // Step 4: atomic replace of the visible file.
-        let visible = self.vault.vault_dir().join(&path);
+        let visible = self.vault.vault_dir().join(path);
         if let Some(parent_dir) = visible.parent() {
             fs::create_dir_all(parent_dir)?;
         }
-        fsutil::write_atomic(&visible, &req.content)?;
+        fsutil::write_atomic(&visible, content)?;
 
         // Step 5: journal append + fsync — the acknowledgment point.
         let record = JournalRecord {
@@ -128,10 +158,10 @@ impl<'v> VaultWriter<'v> {
             ts: intent.ts,
             doc: doc_id.clone(),
             rev: rev.clone(),
-            parent: expected,
+            parent,
             object: object.clone(),
-            path: path.clone(),
-            origin: req.origin,
+            path: path.to_owned(),
+            origin,
         };
         self.vault
             .journal
@@ -146,7 +176,7 @@ impl<'v> VaultWriter<'v> {
         let _ = fs::remove_file(&intent_path);
         self.vault.index.apply(&record);
         if let Some(d) = self.vault.derived.as_mut()
-            && let Err(e) = d.apply_one(&record, &req.content)
+            && let Err(e) = d.apply_one(&record, content)
         {
             self.vault.warnings.push(format!(
                 "derived index update failed ({e}); disabled until next open"
@@ -155,11 +185,19 @@ impl<'v> VaultWriter<'v> {
         }
 
         Ok(SaveOutcome {
-            doc: doc_id,
+            doc: doc_id.clone(),
             rev,
             object,
-            path,
+            path: path.to_owned(),
         })
+    }
+}
+
+fn read_optional(path: &std::path::Path) -> Result<Option<Vec<u8>>, VaultError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(VaultError::Io(e)),
     }
 }
 
