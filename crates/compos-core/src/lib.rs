@@ -6,6 +6,7 @@
 //! construction: `VaultWriter` is the only mutation path, and it can only be
 //! obtained from a `Vault` holding the exclusive vault lock.
 
+pub mod derived;
 pub mod error;
 pub mod fsutil;
 pub mod ids;
@@ -17,6 +18,7 @@ mod reconcile;
 pub mod vault;
 pub mod writer;
 
+pub use derived::{DERIVED_SCHEMA_VERSION, DerivedIndex, SearchHit};
 pub use error::VaultError;
 pub use ids::{DocId, ObjectHash, RevisionId};
 pub use journal::{DocHead, DocIndex, JournalRecord, RevisionOrigin};

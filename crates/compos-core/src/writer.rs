@@ -140,10 +140,19 @@ impl<'v> VaultWriter<'v> {
             .append(&record)?;
 
         // Step 6: clear the intent (resurrection is harmless — W6), advance
-        // the in-memory head. Derived-index refresh is a no-op until SQLite
-        // arrives.
+        // the in-memory head, refresh the derived index. The save is already
+        // acknowledged (step 5), so a derived failure degrades to a warning
+        // and the index rebuilds on the next open — it never fails the save.
         let _ = fs::remove_file(&intent_path);
         self.vault.index.apply(&record);
+        if let Some(d) = self.vault.derived.as_mut()
+            && let Err(e) = d.apply_one(&record, &req.content)
+        {
+            self.vault.warnings.push(format!(
+                "derived index update failed ({e}); disabled until next open"
+            ));
+            self.vault.derived = None;
+        }
 
         Ok(SaveOutcome {
             doc: doc_id,

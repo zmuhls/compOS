@@ -20,3 +20,4 @@ uuid = { version = "1", features = ["v7"] }
 hex = "0.4"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
+rusqlite = { version = "0.40", features = ["bundled"] }

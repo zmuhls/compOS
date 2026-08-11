@@ -33,6 +33,12 @@ enum Command {
     Log { path: Option<String> },
     /// Print a document's canonical content from its head object.
     Cat { path: String },
+    /// Full-text search over document bodies (FTS5 syntax).
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
     /// Print version information.
     Version,
     /// Torture-harness child process (internal).
@@ -122,6 +128,22 @@ fn main() -> anyhow::Result<()> {
             let head = vault.index().head(doc).context("missing head")?;
             let bytes = vault.objects().read(&head.object)?;
             std::io::stdout().write_all(&bytes)?;
+        }
+        Command::Search { query, limit } => {
+            // A read-only open serves a fresh index; if none exists yet,
+            // fall back to a write open, which builds it from the journal.
+            let read = Vault::open_read(&root)?;
+            let hits = if read.derived().is_some() {
+                read.search(&query, limit)?
+            } else {
+                drop(read);
+                let vault = Vault::open_write(&root)?;
+                print_warnings(&vault);
+                vault.search(&query, limit)?
+            };
+            for hit in hits {
+                println!("{}\t{}\t{}", hit.path, hit.doc, hit.snippet);
+            }
         }
         Command::Version => {
             println!(

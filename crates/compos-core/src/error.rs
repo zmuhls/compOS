@@ -19,6 +19,10 @@ pub enum VaultError {
     VaultBusy,
     #[error("vault format {found} is not supported (this build supports up to {supported})")]
     FormatUnsupported { found: u32, supported: u32 },
+    #[error("capability denied: {reason}")]
+    CapabilityDenied { reason: String },
+    #[error("validation failed: {reason}")]
+    ValidationFailed { reason: String },
     #[error("journal corrupt in {segment} at line {line}: {reason}")]
     JournalCorrupt {
         segment: String,
@@ -37,6 +41,8 @@ pub enum VaultError {
     InvalidPath { path: String, reason: String },
     #[error("vault opened read-only")]
     ReadOnly,
+    #[error("derived index: {0}")]
+    Derived(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("json: {0}")]

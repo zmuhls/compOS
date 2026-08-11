@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::VAULT_FORMAT;
+use crate::derived::{DerivedIndex, SearchHit};
 use crate::error::VaultError;
 use crate::fsutil;
 use crate::ids::DocId;
@@ -45,7 +46,8 @@ pub struct Vault {
     pub(crate) index: DocIndex,
     pub(crate) objects: ObjectStore,
     pub(crate) leases: LeaseTable,
-    warnings: Vec<String>,
+    pub(crate) derived: Option<DerivedIndex>,
+    pub(crate) warnings: Vec<String>,
 }
 
 impl Vault {
@@ -88,7 +90,24 @@ impl Vault {
         let records = journal::replay(&journal_dir, false)?;
         let index = DocIndex::build(&records)?;
         let objects = ObjectStore::new(root);
-        let warnings = reconcile::reconcile(root, &index, &objects)?;
+        let mut warnings = reconcile::reconcile(root, &index, &objects)?;
+
+        // Tier-2 derived index: rebuildable, so failure here degrades to a
+        // warning — it never blocks canonical access (rule 4).
+        let derived = match DerivedIndex::open(&root.join("state")) {
+            Ok(mut d) => match d.sync(&format.vault_id, &records, &objects) {
+                Ok(_) => Some(d),
+                Err(e) => {
+                    warnings.push(format!("derived index unavailable: {e}"));
+                    None
+                }
+            },
+            Err(e) => {
+                warnings.push(format!("derived index unavailable: {e}"));
+                None
+            }
+        };
+
         Ok(Vault {
             root: root.to_path_buf(),
             format,
@@ -98,6 +117,7 @@ impl Vault {
             index,
             objects,
             leases: LeaseTable::default(),
+            derived,
             warnings,
         })
     }
@@ -118,6 +138,8 @@ impl Vault {
             index,
             objects: ObjectStore::new(root),
             leases: LeaseTable::default(),
+            // Read-only attach; possibly stale if no writer has synced it.
+            derived: DerivedIndex::open_read_only(&root.join("state")),
             warnings: Vec::new(),
         })
     }
@@ -188,6 +210,21 @@ impl Vault {
 
     pub fn index(&self) -> &DocIndex {
         &self.index
+    }
+
+    /// The tier-2 derived index, when available.
+    pub fn derived(&self) -> Option<&DerivedIndex> {
+        self.derived.as_ref()
+    }
+
+    /// Full-text search through the derived index.
+    pub fn search(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>, VaultError> {
+        match &self.derived {
+            Some(d) => d.search(query, limit),
+            None => Err(VaultError::Derived(
+                "index unavailable (open the vault for writing to build it)".into(),
+            )),
+        }
     }
 
     pub fn objects(&self) -> &ObjectStore {
