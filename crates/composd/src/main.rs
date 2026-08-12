@@ -174,6 +174,7 @@ fn spawn_watcher(
                         let mut with_origin = payload;
                         with_origin["origin"] = json!("external");
                         state.events.publish("revision.committed", with_origin);
+                        compos_rpc::publish_stale_proposals(&state, out.doc.as_str(), &out.path);
                         println!("external revision: {} -> {}", out.path, out.rev);
                     }
                     for path in &scan.missing {

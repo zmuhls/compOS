@@ -25,6 +25,7 @@ pub const COMMAND_UNKNOWN: i64 = 1008;
 pub const JOURNAL_CORRUPT: i64 = 1009;
 pub const OBJECT_MISSING: i64 = 1010;
 pub const JOB_UNKNOWN: i64 = 1011;
+pub const PROPOSAL_NOT_FOUND: i64 = 1012;
 pub const INTERNAL: i64 = 1099;
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +77,7 @@ pub fn map_vault_error(e: &VaultError) -> WireError {
         E::VaultBusy => (VAULT_BUSY, "VAULT_BUSY"),
         E::FormatUnsupported { .. } => (FORMAT_UNSUPPORTED, "FORMAT_UNSUPPORTED"),
         E::DocNotFound(_) => (DOC_NOT_FOUND, "DOC_NOT_FOUND"),
+        E::ProposalNotFound(_) => (PROPOSAL_NOT_FOUND, "PROPOSAL_NOT_FOUND"),
         E::CommandUnknown(_) => (COMMAND_UNKNOWN, "COMMAND_UNKNOWN"),
         E::JournalCorrupt { .. } => (JOURNAL_CORRUPT, "JOURNAL_CORRUPT"),
         E::ObjectMissing { .. } => (OBJECT_MISSING, "OBJECT_MISSING"),

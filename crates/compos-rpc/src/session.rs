@@ -215,6 +215,8 @@ impl Session {
         };
 
         // Post-commit events for the fixed surface's mutating commands.
+        // Every path that commits a revision also fans out `proposal.stale`
+        // for the open proposals that commit stranded.
         match command {
             "document.save" => {
                 self.state.events.publish(
@@ -225,6 +227,7 @@ impl Session {
                         "origin": input.get("origin").and_then(Value::as_str).unwrap_or("editor"),
                     }),
                 );
+                self.stale_fanout(&result);
             }
             "vault.scan" => {
                 if let Some(converted) = result["converted"].as_array() {
@@ -233,13 +236,40 @@ impl Session {
                         let mut payload = c.clone();
                         payload["origin"] = json!("external");
                         self.state.events.publish("revision.committed", payload);
+                        self.stale_fanout(c);
                     }
                 }
+            }
+            "proposal.create" | "proposal.reject" | "proposal.withdraw" => {
+                self.state
+                    .events
+                    .publish("proposal.updated", result.clone());
+            }
+            "proposal.accept.hunk" => {
+                self.state.events.publish(
+                    "revision.committed",
+                    json!({
+                        "doc": result["doc"], "rev": result["rev"],
+                        "object": result["object"], "path": result["path"],
+                        "origin": "proposal-accept",
+                    }),
+                );
+                self.state
+                    .events
+                    .publish("proposal.updated", result.clone());
+                self.stale_fanout(&result);
             }
             _ => {}
         }
 
         Ok(result)
+    }
+
+    /// `proposal.stale` fan-out for a commit result carrying doc + path.
+    fn stale_fanout(&self, committed: &Value) {
+        let doc = committed["doc"].as_str().unwrap_or_default();
+        let path = committed["path"].as_str().unwrap_or_default();
+        crate::publish_stale_proposals(&self.state, doc, path);
     }
 
     fn subscribe(&mut self, params: &Value) -> Result<Value, WireError> {

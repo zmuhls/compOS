@@ -67,6 +67,28 @@ async fn connect(
     (BufReader::new(r).lines(), w)
 }
 
+/// Read lines until an `event` notification on `topic` arrives, skipping
+/// responses and other topics.
+async fn next_event(
+    stream: &mut (
+        tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+        tokio::net::unix::OwnedWriteHalf,
+    ),
+    topic: &str,
+) -> Value {
+    loop {
+        let line = tokio::time::timeout(Duration::from_secs(5), stream.0.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        if v["method"] == json!("event") && v["params"]["topic"] == json!(topic) {
+            return v["params"].clone();
+        }
+    }
+}
+
 /// Rule 1: composd is the sole writer; a second writer fails loudly.
 #[test]
 fn rule1_second_writer_refused() {
@@ -168,6 +190,235 @@ async fn rule6_agent_cannot_commit() {
         !root.join("vault/agent.md").exists(),
         "denied commit must leave no trace"
     );
+}
+
+/// Rules 5 and 6, the Phase-3 propose path: an agent-role connection may
+/// open a proposal (propose-effect) but not accept one (commit-effect); a
+/// shell-role connection accepts chosen hunks, and the accept lands as an
+/// ordinary `proposal-accept` revision — only composd commits.
+#[tokio::test]
+async fn rule5_agent_proposes_shell_accepts_composd_commits() {
+    let (handle, _dir, root) = start_server().await;
+    let mut shell = connect(&handle.socket_path).await;
+    rpc(&mut shell, 1, "hello", json!({"role": "shell"})).await;
+    rpc(
+        &mut shell,
+        2,
+        "commands.invoke",
+        json!({"command": "document.save",
+               "input": {"path": "draft.md", "content": "one\ntwo\n"}}),
+    )
+    .await;
+
+    let mut agent = connect(&handle.socket_path).await;
+    rpc(&mut agent, 1, "hello", json!({"role": "agent"})).await;
+    let created = rpc(
+        &mut agent,
+        2,
+        "commands.invoke",
+        json!({"command": "proposal.create",
+               "input": {"path": "draft.md",
+                          "hunks": [{"start": 0, "del": 1, "ins": "ONE\n"}],
+                          "provenance": {"provider": "test", "model": "none"}}}),
+    )
+    .await;
+    assert_eq!(created["result"]["state"], "open");
+    let pid = created["result"]["proposal"].clone();
+
+    // The proposer cannot consume its own proposal: accept is commit-effect
+    // and the boundary denies it before dispatch.
+    let denied = rpc(
+        &mut agent,
+        3,
+        "commands.invoke",
+        json!({"command": "proposal.accept.hunk", "input": {"proposal": pid}}),
+    )
+    .await;
+    assert_eq!(denied["error"]["data"]["type"], "CAPABILITY_DENIED");
+    assert_eq!(
+        std::fs::read(root.join("vault/draft.md")).unwrap(),
+        b"one\ntwo\n",
+        "denied accept must leave no trace"
+    );
+
+    // The human-role session accepts a chosen hunk.
+    let accepted = rpc(
+        &mut shell,
+        3,
+        "commands.invoke",
+        json!({"command": "proposal.accept.hunk",
+               "input": {"proposal": pid, "hunks": [0]}}),
+    )
+    .await;
+    assert_eq!(accepted["result"]["state"], "accepted");
+    assert_eq!(
+        std::fs::read(root.join("vault/draft.md")).unwrap(),
+        b"ONE\ntwo\n"
+    );
+    let hist = rpc(
+        &mut shell,
+        4,
+        "commands.invoke",
+        json!({"command": "document.history", "input": {"path": "draft.md"}}),
+    )
+    .await;
+    let revs = hist["result"]["revisions"].as_array().unwrap();
+    assert_eq!(revs.last().unwrap()["origin"], "proposal-accept");
+}
+
+/// The Phase-3 stale gate: a commit beneath an open proposal pushes
+/// `proposal.stale` to subscribers, and the accept-time recheck refuses
+/// with STALE_BASE — the proposal stays open, flagged stale, undamaging.
+#[tokio::test]
+async fn stale_proposal_events_and_rejection() {
+    let (handle, _dir, _root) = start_server().await;
+    let mut shell = connect(&handle.socket_path).await;
+    rpc(&mut shell, 1, "hello", json!({"role": "shell"})).await;
+    rpc(
+        &mut shell,
+        2,
+        "events.subscribe",
+        json!({"topics": ["proposal.updated", "proposal.stale"]}),
+    )
+    .await;
+    let saved = rpc(
+        &mut shell,
+        3,
+        "commands.invoke",
+        json!({"command": "document.save",
+               "input": {"path": "s.md", "content": "one\ntwo\n"}}),
+    )
+    .await;
+    let base = saved["result"]["rev"].clone();
+
+    let mut agent = connect(&handle.socket_path).await;
+    rpc(&mut agent, 1, "hello", json!({"role": "agent"})).await;
+    let created = rpc(
+        &mut agent,
+        2,
+        "commands.invoke",
+        json!({"command": "proposal.create",
+               "input": {"path": "s.md", "hunks": [{"start": 1, "del": 1, "ins": "TWO\n"}]}}),
+    )
+    .await;
+    let pid = created["result"]["proposal"].clone();
+    let updated = next_event(&mut shell, "proposal.updated").await;
+    assert_eq!(updated["payload"]["proposal"], pid);
+    assert_eq!(updated["payload"]["state"], "open");
+
+    // The head moves beneath the proposal; the subscriber hears about it.
+    rpc(
+        &mut shell,
+        4,
+        "commands.invoke",
+        json!({"command": "document.save",
+               "input": {"path": "s.md", "content": "one\ntwo\nthree\n", "base": base}}),
+    )
+    .await;
+    let stale = next_event(&mut shell, "proposal.stale").await;
+    assert_eq!(stale["payload"]["proposal"], pid);
+
+    // Accept is refused at accept time; the proposal survives, marked stale.
+    let refused = rpc(
+        &mut shell,
+        5,
+        "commands.invoke",
+        json!({"command": "proposal.accept.hunk", "input": {"proposal": pid}}),
+    )
+    .await;
+    assert_eq!(refused["error"]["data"]["type"], "STALE_BASE");
+    let got = rpc(
+        &mut shell,
+        6,
+        "commands.invoke",
+        json!({"command": "proposal.get", "input": {"proposal": pid}}),
+    )
+    .await;
+    assert_eq!(got["result"]["state"], "open");
+    assert_eq!(got["result"]["stale"], true);
+}
+
+/// Phase-3 exit: proposals are durable state in composd — a daemon restart
+/// over the same vault serves the same open proposal, still acceptable.
+#[tokio::test]
+async fn proposals_survive_daemon_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("v");
+    let config = |n: u32| compos_rpc::RpcConfig {
+        socket_path: dir.path().join(format!("c{n}.sock")),
+        ws_addr: "127.0.0.1:0".parse().unwrap(),
+        token_file: root.join("state").join("rpc-token"),
+    };
+
+    {
+        let vault = Vault::init(&root).unwrap();
+        let handle = compos_rpc::start(vault, CommandRegistry::with_builtins(), config(1))
+            .await
+            .unwrap();
+        let mut shell = connect(&handle.socket_path).await;
+        rpc(&mut shell, 1, "hello", json!({"role": "shell"})).await;
+        rpc(
+            &mut shell,
+            2,
+            "commands.invoke",
+            json!({"command": "document.save",
+                   "input": {"path": "a.md", "content": "one\n"}}),
+        )
+        .await;
+        let mut agent = connect(&handle.socket_path).await;
+        rpc(&mut agent, 1, "hello", json!({"role": "agent"})).await;
+        let created = rpc(
+            &mut agent,
+            2,
+            "commands.invoke",
+            json!({"command": "proposal.create",
+                   "input": {"path": "a.md", "hunks": [{"start": 0, "del": 1, "ins": "ONE\n"}]}}),
+        )
+        .await;
+        assert_eq!(created["result"]["state"], "open");
+        // Connections and handle drop here; the vault flock releases as the
+        // per-connection tasks finish.
+    }
+
+    let vault = {
+        let mut tries = 0;
+        loop {
+            match Vault::open_write(&root) {
+                Ok(v) => break v,
+                Err(VaultError::VaultBusy) if tries < 100 => {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("reopen failed: {e}"),
+            }
+        }
+    };
+    let handle = compos_rpc::start(vault, CommandRegistry::with_builtins(), config(2))
+        .await
+        .unwrap();
+    let mut shell = connect(&handle.socket_path).await;
+    rpc(&mut shell, 1, "hello", json!({"role": "shell"})).await;
+    let listed = rpc(
+        &mut shell,
+        2,
+        "commands.invoke",
+        json!({"command": "proposal.list", "input": {"state": "open"}}),
+    )
+    .await;
+    let props = listed["result"]["proposals"].as_array().unwrap();
+    assert_eq!(props.len(), 1);
+
+    // Review mode survived the restart: the proposal still accepts.
+    let accepted = rpc(
+        &mut shell,
+        3,
+        "commands.invoke",
+        json!({"command": "proposal.accept.hunk",
+               "input": {"proposal": props[0]["proposal"]}}),
+    )
+    .await;
+    assert_eq!(accepted["result"]["state"], "accepted");
+    assert_eq!(std::fs::read(root.join("vault/a.md")).unwrap(), b"ONE\n");
 }
 
 /// Never-clobber: an out-of-band file edit becomes an `external` revision

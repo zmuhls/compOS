@@ -245,6 +245,33 @@ async fn forward_event(
     }
 }
 
+/// After a commit lands on `doc`, tell subscribers which open proposals it
+/// stranded (§6 `proposal.stale`): their base no longer equals the new head.
+/// Called from the session layer after mutating commands and from the
+/// external-edit watcher — staleness is derived, never stored, so repeat
+/// notifications for the same proposal are possible and harmless.
+pub fn publish_stale_proposals(state: &AppState, doc: &str, path: &str) {
+    let payloads: Vec<serde_json::Value> = {
+        let vault = state.vault.lock().unwrap();
+        let doc_id = compos_core::DocId::from_string(doc.to_owned());
+        let head = vault.index().head(&doc_id).map(|h| h.rev.clone());
+        vault
+            .open_proposals_touching(&doc_id, path)
+            .into_iter()
+            .filter(|p| vault.proposal_is_stale(p))
+            .map(|p| {
+                serde_json::json!({
+                    "proposal": p.id, "doc": p.doc, "path": p.path,
+                    "base": p.base, "head": head,
+                })
+            })
+            .collect()
+    };
+    for payload in payloads {
+        state.events.publish("proposal.stale", payload);
+    }
+}
+
 fn generate_token() -> String {
     // Two UUIDv7s ≈ 148 bits of randomness; ample for a localhost token.
     format!(
