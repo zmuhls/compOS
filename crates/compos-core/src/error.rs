@@ -37,6 +37,8 @@ pub enum VaultError {
     AlreadyAVault(PathBuf),
     #[error("document not found: {0}")]
     DocNotFound(String),
+    #[error("proposal not found: {0}")]
+    ProposalNotFound(String),
     #[error("unknown command: {0}")]
     CommandUnknown(String),
     #[error("invalid vault path {path:?}: {reason}")]

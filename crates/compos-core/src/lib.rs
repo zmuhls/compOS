@@ -17,6 +17,7 @@ pub mod journal;
 pub mod lease;
 pub mod objects;
 pub mod profile;
+pub mod proposal;
 mod reconcile;
 pub mod vault;
 pub mod writer;
@@ -28,10 +29,13 @@ pub use command::{
 pub use derived::{DERIVED_SCHEMA_VERSION, DerivedIndex, SearchHit};
 pub use error::VaultError;
 pub use external::ExternalScan;
-pub use ids::{DocId, ObjectHash, RevisionId};
+pub use ids::{DocId, ObjectHash, ProposalId, RevisionId};
 pub use journal::{DocHead, DocIndex, JournalRecord, RevisionOrigin};
 pub use lease::{Lease, LeaseId};
 pub use profile::HostProfile;
+pub use proposal::{
+    AcceptOutcome, CreateProposal, Hunk, PROPOSAL_RECORD_VERSION, Proposal, ProposalState,
+};
 pub use vault::Vault;
 pub use writer::{DocRef, SaveOutcome, SaveRequest, VaultWriter};
 

@@ -16,8 +16,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::error::VaultError;
-use crate::ids::RevisionId;
+use crate::ids::{ProposalId, RevisionId};
 use crate::journal::RevisionOrigin;
+use crate::proposal::{CreateProposal, Hunk, Proposal};
 use crate::vault::Vault;
 use crate::writer::{DocRef, SaveRequest};
 
@@ -455,6 +456,8 @@ fn register_builtins(r: &mut CommandRegistry) -> Result<(), VaultError> {
         }),
     )?;
 
+    register_proposals(r)?;
+
     // The §7 exemplar of a system-effect command: exists on every profile
     // with an identical schema, and resolves to dry-run below appliance
     // profiles. Every Phase-1 profile is a dev profile, so dry_run is
@@ -493,6 +496,271 @@ fn register_builtins(r: &mut CommandRegistry) -> Result<(), VaultError> {
                  "ok": vault.warnings().is_empty()},
             ]);
             Ok(json!({"dry_run": true, "checks": checks}))
+        }),
+    )?;
+
+    Ok(())
+}
+
+/// One proposal as command output: full record plus the derived `stale`
+/// flag, so clients never have to reimplement the staleness rule.
+fn proposal_json(vault: &Vault, p: &Proposal) -> Value {
+    let mut out = json!({
+        "proposal": p.id,
+        "doc": p.doc,
+        "path": p.path,
+        "base": p.base,
+        "base_object": p.base_object,
+        "hunks": p.hunks,
+        "provenance": p.provenance,
+        "evidence": p.evidence,
+        "created_ms": p.created_ms,
+        "state": p.state.name(),
+        "stale": vault.proposal_is_stale(p),
+    });
+    match &p.state {
+        crate::proposal::ProposalState::Accepted {
+            hunks,
+            rev,
+            resolved_ms,
+        } => {
+            out["accepted_hunks"] = json!(hunks);
+            out["rev"] = json!(rev);
+            out["resolved_ms"] = json!(resolved_ms);
+        }
+        crate::proposal::ProposalState::Rejected { resolved_ms }
+        | crate::proposal::ProposalState::Withdrawn { resolved_ms } => {
+            out["resolved_ms"] = json!(resolved_ms);
+        }
+        crate::proposal::ProposalState::Open => {}
+    }
+    out
+}
+
+fn proposal_id_field(input: &Value) -> ProposalId {
+    ProposalId::from_string(str_field(input, "proposal"))
+}
+
+/// The Phase-3 proposal surface (§9, §12 Review). Effect classes carry the
+/// constitution: `create`/`withdraw` are propose-effect (agent-reachable),
+/// `accept.hunk`/`reject` are commit-effect (the boundary denies them to
+/// agent-role connections before dispatch — "only composd commits" means
+/// only a human-role session turns a proposal into canonical bytes).
+fn register_proposals(r: &mut CommandRegistry) -> Result<(), VaultError> {
+    let object_schema = |props: Value, required: &[&str]| {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": required,
+            "properties": props,
+        })
+    };
+    let hunks_schema = json!({
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["start", "del", "ins"],
+            "properties": {
+                "start": {"type": "integer", "minimum": 0},
+                "del": {"type": "integer", "minimum": 0},
+                "ins": {"type": "string"},
+            },
+        },
+    });
+    let proposal_ref = json!({"type": "string", "minLength": 1});
+
+    r.register(
+        CommandSpec {
+            id: "proposal.create".into(),
+            summary: "Open a proposal of line-based hunks against a document's head".into(),
+            input_schema: object_schema(
+                json!({
+                    "path": {"type": "string", "minLength": 1},
+                    "hunks": hunks_schema,
+                    "provenance": {"type": "object"},
+                    "evidence": {"type": "array"},
+                }),
+                &["path", "hunks"],
+            ),
+            output_schema: object_schema(json!({"proposal": {"type": "string"}}), &["proposal"]),
+            capabilities: vec!["proposal.propose".into()],
+            effect: Effect::Propose,
+            network: NetworkPolicy::Never,
+            context_policy: "document".into(),
+            undo_policy: "withdraw".into(),
+            resource_class: ResourceClass::Interactive,
+            default_keys: vec![],
+        },
+        Box::new(|vault, input| {
+            let hunks: Vec<Hunk> = serde_json::from_value(input["hunks"].clone())?;
+            let p = vault.create_proposal(CreateProposal {
+                path: str_field(&input, "path"),
+                hunks,
+                provenance: input
+                    .get("provenance")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+                evidence: input.get("evidence").cloned().unwrap_or_else(|| json!([])),
+            })?;
+            Ok(proposal_json(vault, &p))
+        }),
+    )?;
+
+    r.register(
+        CommandSpec {
+            id: "proposal.list".into(),
+            summary: "List proposals, optionally filtered by path or state".into(),
+            input_schema: object_schema(
+                json!({
+                    "path": {"type": "string"},
+                    "state": {"type": "string",
+                              "enum": ["open", "accepted", "rejected", "withdrawn"]},
+                }),
+                &[],
+            ),
+            output_schema: object_schema(json!({"proposals": {"type": "array"}}), &["proposals"]),
+            capabilities: vec!["proposal.read".into()],
+            effect: Effect::Read,
+            network: NetworkPolicy::Never,
+            context_policy: "vault".into(),
+            undo_policy: "none".into(),
+            resource_class: ResourceClass::Interactive,
+            default_keys: vec![],
+        },
+        Box::new(|vault, input| {
+            let path = input.get("path").and_then(Value::as_str);
+            let state = input.get("state").and_then(Value::as_str);
+            let proposals: Vec<_> = vault
+                .proposals()
+                .filter(|p| path.is_none_or(|q| p.path == q))
+                .filter(|p| state.is_none_or(|s| p.state.name() == s))
+                .map(|p| proposal_json(vault, p))
+                .collect();
+            Ok(json!({"proposals": proposals}))
+        }),
+    )?;
+
+    r.register(
+        CommandSpec {
+            id: "proposal.get".into(),
+            summary: "One proposal in full, with its base content for review".into(),
+            input_schema: object_schema(json!({"proposal": proposal_ref}), &["proposal"]),
+            output_schema: object_schema(
+                json!({"proposal": {"type": "string"}, "base_content": {"type": "string"}}),
+                &["proposal"],
+            ),
+            capabilities: vec!["proposal.read".into()],
+            effect: Effect::Read,
+            network: NetworkPolicy::Never,
+            context_policy: "proposal".into(),
+            undo_policy: "none".into(),
+            resource_class: ResourceClass::Interactive,
+            default_keys: vec![],
+        },
+        Box::new(|vault, input| {
+            let id = proposal_id_field(&input);
+            let p = vault.proposal(&id)?.clone();
+            let base_content = match &p.base_object {
+                Some(obj) => String::from_utf8_lossy(&vault.objects().read(obj)?).into_owned(),
+                None => String::new(),
+            };
+            let mut out = proposal_json(vault, &p);
+            out["base_content"] = json!(base_content);
+            Ok(out)
+        }),
+    )?;
+
+    // §7's exemplar command id, verbatim: proposal.accept.hunk.
+    r.register(
+        CommandSpec {
+            id: "proposal.accept.hunk".into(),
+            summary: "Accept selected hunks (default: all) as a proposal-accept revision".into(),
+            input_schema: object_schema(
+                json!({
+                    "proposal": proposal_ref,
+                    "hunks": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+                }),
+                &["proposal"],
+            ),
+            output_schema: object_schema(
+                json!({
+                    "proposal": {"type": "string"},
+                    "doc": {"type": "string"},
+                    "rev": {"type": "string"},
+                    "object": {"type": "string"},
+                    "path": {"type": "string"},
+                    "accepted_hunks": {"type": "array"},
+                }),
+                &["proposal", "doc", "rev", "object", "path", "accepted_hunks"],
+            ),
+            capabilities: vec!["vault.write".into(), "proposal.review".into()],
+            effect: Effect::Commit,
+            network: NetworkPolicy::Never,
+            context_policy: "proposal".into(),
+            undo_policy: "new-revision".into(),
+            resource_class: ResourceClass::Interactive,
+            default_keys: vec![],
+        },
+        Box::new(|vault, input| {
+            let id = proposal_id_field(&input);
+            let selected = input.get("hunks").and_then(Value::as_array).map(|a| {
+                a.iter()
+                    .filter_map(Value::as_u64)
+                    .map(|n| n as usize)
+                    .collect::<Vec<_>>()
+            });
+            let out = vault.accept_proposal(&id, selected, None)?;
+            let mut resp = proposal_json(vault, &out.proposal);
+            resp["doc"] = json!(out.save.doc);
+            resp["rev"] = json!(out.save.rev);
+            resp["object"] = json!(out.save.object);
+            resp["path"] = json!(out.save.path);
+            resp["accepted_hunks"] = json!(out.accepted_hunks);
+            Ok(resp)
+        }),
+    )?;
+
+    r.register(
+        CommandSpec {
+            id: "proposal.reject".into(),
+            summary: "Decline an open proposal".into(),
+            input_schema: object_schema(json!({"proposal": proposal_ref}), &["proposal"]),
+            output_schema: object_schema(json!({"proposal": {"type": "string"}}), &["proposal"]),
+            capabilities: vec!["proposal.review".into()],
+            effect: Effect::Commit,
+            network: NetworkPolicy::Never,
+            context_policy: "proposal".into(),
+            undo_policy: "none".into(),
+            resource_class: ResourceClass::Interactive,
+            default_keys: vec![],
+        },
+        Box::new(|vault, input| {
+            let id = proposal_id_field(&input);
+            let p = vault.reject_proposal(&id)?;
+            Ok(proposal_json(vault, &p))
+        }),
+    )?;
+
+    r.register(
+        CommandSpec {
+            id: "proposal.withdraw".into(),
+            summary: "Withdraw an open proposal (the proposer's undo)".into(),
+            input_schema: object_schema(json!({"proposal": proposal_ref}), &["proposal"]),
+            output_schema: object_schema(json!({"proposal": {"type": "string"}}), &["proposal"]),
+            capabilities: vec!["proposal.propose".into()],
+            effect: Effect::Propose,
+            network: NetworkPolicy::Never,
+            context_policy: "proposal".into(),
+            undo_policy: "none".into(),
+            resource_class: ResourceClass::Interactive,
+            default_keys: vec![],
+        },
+        Box::new(|vault, input| {
+            let id = proposal_id_field(&input);
+            let p = vault.withdraw_proposal(&id)?;
+            Ok(proposal_json(vault, &p))
         }),
     )?;
 

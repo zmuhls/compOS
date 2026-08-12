@@ -18,6 +18,12 @@ pub struct RevisionId(String);
 #[serde(transparent)]
 pub struct ObjectHash(String);
 
+/// Identity of one AI proposal (ARCHITECTURE.md §9). UUIDv7 keeps ids
+/// time-ordered, so sorted-by-id listings are sorted-by-creation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProposalId(String);
+
 macro_rules! prefixed_id {
     ($ty:ident, $prefix:literal) => {
         impl $ty {
@@ -47,6 +53,7 @@ macro_rules! prefixed_id {
 
 prefixed_id!(DocId, "d_");
 prefixed_id!(RevisionId, "r_");
+prefixed_id!(ProposalId, "pr_");
 
 impl ObjectHash {
     const PREFIX: &'static str = "sha256:";

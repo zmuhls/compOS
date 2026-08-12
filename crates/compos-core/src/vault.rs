@@ -13,12 +13,16 @@ use crate::VAULT_FORMAT;
 use crate::derived::{DerivedIndex, SearchHit};
 use crate::error::VaultError;
 use crate::fsutil;
-use crate::ids::DocId;
-use crate::journal::{self, DocIndex, Journal, JournalRecord};
+use crate::ids::{DocId, ProposalId};
+use crate::journal::{self, DocIndex, Journal, JournalRecord, RevisionOrigin};
 use crate::lease::{Lease, LeaseId, LeaseTable};
 use crate::objects::ObjectStore;
+use crate::proposal::{
+    self, AcceptOutcome, CreateProposal, PROPOSAL_RECORD_VERSION, Proposal, ProposalBody,
+    ProposalRecord, ProposalStore, Resolution,
+};
 use crate::reconcile;
-use crate::writer::VaultWriter;
+use crate::writer::{DocRef, SaveRequest, VaultWriter, validate_vault_path};
 
 /// `compos.json` — the vault format file. Its version governs the on-disk
 /// canonical layout and is distinct from the SQLite schema version
@@ -47,6 +51,7 @@ pub struct Vault {
     pub(crate) objects: ObjectStore,
     pub(crate) leases: LeaseTable,
     pub(crate) derived: Option<DerivedIndex>,
+    pub(crate) proposals: ProposalStore,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -96,6 +101,7 @@ impl Vault {
         let records = journal::replay(&journal_dir, false)?;
         let index = DocIndex::build(&records)?;
         let objects = ObjectStore::new(root);
+        let proposals = ProposalStore::open_write(&journal_dir.join("proposals"))?;
         let mut warnings = reconcile::reconcile(root, &index, &objects)?;
 
         // Tier-2 derived index: rebuildable, so failure here degrades to a
@@ -124,6 +130,7 @@ impl Vault {
             objects,
             leases: LeaseTable::default(),
             derived,
+            proposals,
             warnings,
         })
     }
@@ -146,6 +153,7 @@ impl Vault {
             leases: LeaseTable::default(),
             // Read-only attach; possibly stale if no writer has synced it.
             derived: DerivedIndex::open_read_only(&root.join("state")),
+            proposals: ProposalStore::open_read(&root.join("journal").join("proposals"))?,
             warnings: Vec::new(),
         })
     }
@@ -263,6 +271,213 @@ impl Vault {
     pub fn history(&self, doc: &DocId) -> Result<Vec<JournalRecord>, VaultError> {
         let records = journal::replay(&self.root.join("journal"), true)?;
         Ok(records.into_iter().filter(|r| &r.doc == doc).collect())
+    }
+
+    /// Open a proposal against the current head of `path` (or against
+    /// nothing, for a new document). Hunks are validated against the base
+    /// content here, once — accept only re-checks staleness.
+    pub fn create_proposal(&mut self, req: CreateProposal) -> Result<Proposal, VaultError> {
+        if self.mode != OpenMode::Write {
+            return Err(VaultError::ReadOnly);
+        }
+        validate_vault_path(&req.path)?;
+        let (doc, base, base_object) = match self.index.doc_by_path(&req.path) {
+            Some(doc) => {
+                let head = self.index.head(doc).expect("indexed doc has a head");
+                (
+                    Some(doc.clone()),
+                    Some(head.rev.clone()),
+                    Some(head.object.clone()),
+                )
+            }
+            None => (None, None, None),
+        };
+        let base_bytes = match &base_object {
+            Some(obj) => self.objects.read(obj)?,
+            None => Vec::new(),
+        };
+        proposal::validate_hunks(&req.hunks, proposal::line_count(&base_bytes))?;
+        let record = ProposalRecord {
+            v: PROPOSAL_RECORD_VERSION,
+            ts: fsutil::now_ms(),
+            prop: ProposalId::generate(),
+            body: ProposalBody::Create {
+                doc,
+                path: req.path,
+                base,
+                base_object,
+                hunks: req.hunks,
+                provenance: req.provenance,
+                evidence: req.evidence,
+            },
+        };
+        self.proposals.append(&record)?;
+        Ok(self
+            .proposals
+            .get(&record.prop)
+            .expect("just appended")
+            .clone())
+    }
+
+    pub fn proposal(&self, id: &ProposalId) -> Result<&Proposal, VaultError> {
+        self.proposals
+            .get(id)
+            .ok_or_else(|| VaultError::ProposalNotFound(id.to_string()))
+    }
+
+    /// Every proposal, in creation order (UUIDv7 ids sort by time).
+    pub fn proposals(&self) -> impl Iterator<Item = &Proposal> {
+        self.proposals.iter()
+    }
+
+    /// Derived staleness (§12 Review, donor pattern): an open proposal whose
+    /// base no longer equals the document head cannot be accepted. Never
+    /// stored — always recomputed against the live index.
+    pub fn proposal_is_stale(&self, p: &Proposal) -> bool {
+        if !p.state.is_open() {
+            return false;
+        }
+        let head_rev = self
+            .index
+            .doc_by_path(&p.path)
+            .and_then(|d| self.index.head(d))
+            .map(|h| &h.rev);
+        head_rev != p.base.as_ref()
+    }
+
+    /// Accept a proposal's hunks (`None` = all of them): re-check staleness
+    /// at accept time, splice the selected hunks into the base content, and
+    /// commit the result through the ordinary save transaction as a
+    /// `proposal-accept` revision. Canonical state moves first; the resolve
+    /// record follows — a crash in between leaves the proposal open against
+    /// a moved head (derived-stale, rejectable), never an acceptance
+    /// claiming a commit that didn't happen.
+    pub fn accept_proposal(
+        &mut self,
+        id: &ProposalId,
+        selected: Option<Vec<usize>>,
+        lease: Option<LeaseId>,
+    ) -> Result<AcceptOutcome, VaultError> {
+        if self.mode != OpenMode::Write {
+            return Err(VaultError::ReadOnly);
+        }
+        let p = self.proposal(id)?.clone();
+        if !p.state.is_open() {
+            return Err(VaultError::ValidationFailed {
+                reason: format!("proposal {id} is already {}", p.state.name()),
+            });
+        }
+        // The accept-time stale recheck (§7): staleness at proposal time is
+        // caught at create; this catches every commit since.
+        let head_rev = self
+            .index
+            .doc_by_path(&p.path)
+            .and_then(|d| self.index.head(d))
+            .map(|h| h.rev.clone());
+        if head_rev != p.base {
+            return Err(VaultError::StaleBase {
+                expected: head_rev,
+                got: p.base.clone(),
+            });
+        }
+        let mut sel = selected.unwrap_or_else(|| (0..p.hunks.len()).collect());
+        sel.sort_unstable();
+        sel.dedup();
+        if sel.is_empty() {
+            return Err(VaultError::ValidationFailed {
+                reason: "accepting zero hunks is a no-op; reject instead".into(),
+            });
+        }
+        if let Some(&max) = sel.last()
+            && max >= p.hunks.len()
+        {
+            return Err(VaultError::ValidationFailed {
+                reason: format!(
+                    "hunk index {max} out of range (proposal has {} hunks)",
+                    p.hunks.len()
+                ),
+            });
+        }
+        let base_bytes = match &p.base_object {
+            Some(obj) => self.objects.read(obj)?,
+            None => Vec::new(),
+        };
+        let merged = proposal::apply_hunks(&base_bytes, &p.hunks, &sel);
+        let doc_ref = match &p.doc {
+            Some(d) => DocRef::Id(d.clone()),
+            None => DocRef::Path(p.path.clone()),
+        };
+        let save = self.writer()?.save(SaveRequest {
+            doc: doc_ref,
+            base: p.base.clone(),
+            content: merged,
+            origin: RevisionOrigin::ProposalAccept,
+            lease,
+        })?;
+        let record = ProposalRecord {
+            v: PROPOSAL_RECORD_VERSION,
+            ts: fsutil::now_ms(),
+            prop: id.clone(),
+            body: ProposalBody::Resolve {
+                resolution: Resolution::Accepted,
+                hunks: Some(sel.clone()),
+                rev: Some(save.rev.clone()),
+            },
+        };
+        self.proposals.append(&record)?;
+        Ok(AcceptOutcome {
+            save,
+            accepted_hunks: sel,
+            proposal: self.proposal(id)?.clone(),
+        })
+    }
+
+    /// The reviewer declines the proposal (commit-effect at the boundary).
+    pub fn reject_proposal(&mut self, id: &ProposalId) -> Result<Proposal, VaultError> {
+        self.resolve_simple(id, Resolution::Rejected)
+    }
+
+    /// The proposer takes it back (propose-effect at the boundary).
+    pub fn withdraw_proposal(&mut self, id: &ProposalId) -> Result<Proposal, VaultError> {
+        self.resolve_simple(id, Resolution::Withdrawn)
+    }
+
+    fn resolve_simple(
+        &mut self,
+        id: &ProposalId,
+        resolution: Resolution,
+    ) -> Result<Proposal, VaultError> {
+        if self.mode != OpenMode::Write {
+            return Err(VaultError::ReadOnly);
+        }
+        let p = self.proposal(id)?;
+        if !p.state.is_open() {
+            return Err(VaultError::ValidationFailed {
+                reason: format!("proposal {id} is already {}", p.state.name()),
+            });
+        }
+        let record = ProposalRecord {
+            v: PROPOSAL_RECORD_VERSION,
+            ts: fsutil::now_ms(),
+            prop: id.clone(),
+            body: ProposalBody::Resolve {
+                resolution,
+                hunks: None,
+                rev: None,
+            },
+        };
+        self.proposals.append(&record)?;
+        Ok(self.proposal(id)?.clone())
+    }
+
+    /// Open proposals a commit to this document may have invalidated —
+    /// matched by document id or path, so renames still hit.
+    pub fn open_proposals_touching(&self, doc: &DocId, path: &str) -> Vec<&Proposal> {
+        self.proposals
+            .iter()
+            .filter(|p| p.state.is_open())
+            .filter(|p| p.doc.as_ref() == Some(doc) || p.path == path)
+            .collect()
     }
 
     pub(crate) fn vault_dir(&self) -> PathBuf {

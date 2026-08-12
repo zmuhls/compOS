@@ -203,7 +203,7 @@ fn read_optional(path: &std::path::Path) -> Result<Option<Vec<u8>>, VaultError> 
 
 /// Vault paths are relative, normal-component-only, and never collide with
 /// the atomic-write temp namespace.
-fn validate_vault_path(path: &str) -> Result<(), VaultError> {
+pub(crate) fn validate_vault_path(path: &str) -> Result<(), VaultError> {
     let reject = |reason: &str| {
         Err(VaultError::InvalidPath {
             path: path.to_owned(),
