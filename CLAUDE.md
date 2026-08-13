@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-CompOS is writing/reading software with one document authority (`composd`). **ARCHITECTURE.md is the design authority** — read the relevant section before changing anything structural; section numbers below refer to it. The build plan (§16) runs Phase 0 → 7; Phases 0 and 1 are complete (vault, objects, journal, save transaction, SQLite/FTS5 tier-2, external-edit watcher, command registry, compos-rpc, N/N-1 harness, round-trip harness, conformance suite, torture gates; both former `DECISION(user)` markers ratified 2026-08-11 — see the `RATIFIED` comments in `journal.rs` and `lease.rs`). Next: Phase 2 (web shell — Write + Search + basic Read).
+CompOS is writing/reading software with one document authority (`composd`). **ARCHITECTURE.md is the design authority** — read the relevant section before changing anything structural; section numbers below refer to it. The build plan (§16) runs Phase 0 → 7; Phases 0–2 are complete (vault, objects, journal, save transaction, SQLite/FTS5 tier-2, external-edit watcher, command registry, compos-rpc, N/N-1 harness, round-trip harness, conformance suite, torture gates, and the web shell — Write/Read/Search/Review, palette, WCAG 2.2 axe + keyboard-complete e2e gates; the `journal.rs` and `lease.rs` `DECISION(user)` markers were ratified 2026-08-11). Phase 3's composd-side proposal plane is live (store, per-hunk accept, accept-time stale recheck, conformance gates; the proposal record format carries an open `DECISION(user)` marker in `proposal.rs`). Remaining Phase 3: `agentd` (ACP client host, MCP broker), `modeld` (embeddings), prompt-injection hygiene.
 
 ## Commands
 
@@ -17,8 +17,10 @@ cargo test -p compos-core save_and_read_back         # one test by name
 TORTURE_ITERS=1000 cargo test -p composctl --test torture   # milestone gate
 TORTURE_ITERS=1000 TORTURE_DOCS=500 cargo test -p composctl --test torture  # phase-1 exit gate
 cargo test -p compos-rpc --test conformance          # constitution suite
+cargo test -p compos-core --test proposals           # proposal plane suite
 cargo test -p composd --test daemon                  # live daemon + watcher e2e (notify-timing sensitive)
 pnpm install && pnpm -C shell typecheck && pnpm -C shell build   # web shell
+cargo build -p composd -p composctl && pnpm -C shell test:e2e    # playwright + axe WCAG 2.2 gate (boots a real composd)
 cargo run -p composctl -- --vault /tmp/v init        # manual smoke
 cargo run -p composd -- --vault /tmp/v               # run the daemon (uds + ws :7411)
 ```
@@ -42,6 +44,10 @@ Four crates: `compos-core` (pure sync library — all the semantics), `compos-rp
 **Single-writer enforcement is by construction** (rule 1, §3): `VaultWriter` is the only mutation path, obtainable only from `Vault::open_write`, which holds an exclusive flock; a second writer gets `VaultBusy`. `VaultError` variants mirror the RPC wire errors 1:1 — `proto.rs::map_vault_error` is the single mapping; extend both sides together when adding variants.
 
 **The registry is the API** (§7, `command.rs`): the RPC surface is six fixed methods, and everything else is a registry command with an effect class (`read < propose < commit < system`). Inputs are validated against the same JSON Schema `commands.describe` publishes. Role caps at the boundary (`session.rs`): shell/service ≤ commit, agent ≤ propose, maintenance ≤ system — an agent invoking a commit command gets `CAPABILITY_DENIED` before dispatch (rule 6; `tests/conformance.rs` is the constitution suite and must keep passing as-is).
+
+**Proposals are durable composd state** (§5.2, §9, `proposal.rs`): `journal/proposals/*.jsonl` is an append-only create/resolve event log with the same tail-repair and fsync discipline as the revision journal, deliberately placed in a subdirectory so format-1 revision replay never sees it (no `vault_format` bump; N and N-1 keep opening each other's vaults). State is derived by replay; staleness is always computed, never stored. `proposal.accept.hunk` re-verifies the base at accept time and commits through the ordinary save transaction as a `proposal-accept` revision — canonical state moves first, the resolve record second, so a crash between them leaves an open-and-stale proposal, never a false acceptance. Effect classes carry rule 6: `create`/`withdraw` are propose, `accept.hunk`/`reject` are commit. The record wire format and placement carry an open `DECISION(user)` marker in `proposal.rs` — working defaults shipped, not yet ratified.
+
+**The shell holds no canonical state** (`shell/src`): one WebSocket JSON-RPC client (`rpc.ts`, token presented at `hello`), four modes plus a `commands.list`-driven palette, and event-driven refresh (`revision.committed`, `proposal.updated`/`proposal.stale`; sequence gaps trigger resync). The e2e suite (`shell/tests`) boots a real composd over a scratch vault in `global-setup.ts` — keep it mock-free; the axe WCAG 2.2 sweep and the keyboard-only write/save/search loop are the Phase-2 CI gates (`shell-e2e` job).
 
 **Frozen fixtures are contracts.** `compos-core/tests/fixtures/vault-format-N/` are golden vaults generated once by the build that introduced format N and never regenerated — `schema_compat.rs` forces every supported format to keep opening (tier-1 N/N-1 gate). `tests/fixtures/roundtrip/<codec-id>/` is the round-trip corpus (`codec.rs`; the `Codec` trait makes one-way codecs unrepresentable).
 
