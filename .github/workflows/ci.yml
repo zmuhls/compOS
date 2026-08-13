@@ -38,3 +38,27 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm -C shell typecheck
       - run: pnpm -C shell build
+
+  # The Phase-2 gates (ARCHITECTURE.md §16): the axe-core WCAG 2.2 suite and
+  # the keyboard-complete write/save/search loop, run against a real composd
+  # over a scratch vault — nothing mocked.
+  shell-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p composd -p composctl
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Cache playwright chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+      - run: pnpm -C shell exec playwright install --with-deps chromium
+      - run: pnpm -C shell test:e2e
